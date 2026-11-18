@@ -9,7 +9,9 @@ CREATE TABLE IF NOT EXISTS waybills (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   status_proj TEXT NOT NULL DEFAULT '未知',
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  merged_into TEXT,
+  merged_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS hops (
@@ -47,6 +49,45 @@ CREATE TABLE IF NOT EXISTS status_proofs (
   proj_value TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+-- 合并批次：一次合并尝试一行，成功 / 失败均留痕。
+CREATE TABLE IF NOT EXISTS merge_batches (
+  id TEXT PRIMARY KEY,
+  master_id TEXT NOT NULL,
+  status TEXT NOT NULL,              -- committed / rolled_back
+  error TEXT,
+  member_ids_json TEXT NOT NULL DEFAULT '[]',
+  merged_count INTEGER NOT NULL DEFAULT 0,
+  proj_before_json TEXT NOT NULL DEFAULT '{}',
+  proj_after_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+
+-- 合并边：主单 ← 成员段，可查且不可重复合并。
+CREATE TABLE IF NOT EXISTS merge_edges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id TEXT NOT NULL REFERENCES merge_batches(id),
+  master_id TEXT NOT NULL REFERENCES waybills(id),
+  member_id TEXT NOT NULL REFERENCES waybills(id),
+  merged_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  UNIQUE(member_id)                  -- 一个成员段只能并入一个主单一次
+);
+CREATE INDEX IF NOT EXISTS idx_merge_edges_master ON merge_edges(master_id);
+
+-- 并入主单正式时间线的成员点（来源可溯）。
+CREATE TABLE IF NOT EXISTS merge_hops (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id TEXT NOT NULL REFERENCES merge_batches(id),
+  master_id TEXT NOT NULL,
+  member_id TEXT NOT NULL,
+  hop_id TEXT NOT NULL,
+  source_hop_id TEXT NOT NULL,
+  event_ts TEXT NOT NULL,
+  UNIQUE(master_id, hop_id)
+);
+CREATE INDEX IF NOT EXISTS idx_merge_hops_batch ON merge_hops(batch_id);
+CREATE INDEX IF NOT EXISTS idx_merge_hops_hop ON merge_hops(hop_id);
 """
 
 EVENT_STATUS = {
@@ -62,11 +103,21 @@ EVENT_STATUS = {
 def init_db():
     conn = connect()
     conn.executescript(SCHEMA)
+    _migrate(conn)
     n = conn.execute("SELECT COUNT(*) AS c FROM waybills").fetchone()["c"]
     if n == 0:
         _seed_fixtures(conn)
     conn.commit()
     conn.close()
+
+
+def _migrate(conn):
+    """旧库补齐合并相关列（CREATE IF NOT EXISTS 不会给已有表加列）。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(waybills)").fetchall()}
+    if "merged_into" not in cols:
+        conn.execute("ALTER TABLE waybills ADD COLUMN merged_into TEXT")
+    if "merged_at" not in cols:
+        conn.execute("ALTER TABLE waybills ADD COLUMN merged_at TEXT")
 
 
 def _seed_fixtures(conn):
@@ -96,25 +147,14 @@ def _seed_fixtures(conn):
 
 
 def _refresh_projections(conn):
-    rows = conn.execute(
-        """
-        SELECT h.waybill_id, h.id, h.event_code
-        FROM hops h
-        JOIN (
-          SELECT waybill_id, MAX(event_ts || '|' || id) AS mk
-          FROM hops WHERE retracted=0 AND channel='primary'
-          GROUP BY waybill_id
-        ) t ON t.waybill_id=h.waybill_id AND (h.event_ts || '|' || h.id)=t.mk
-        WHERE h.retracted=0 AND h.channel='primary'
-        """
-    ).fetchall()
-    for r in rows:
-        proj = EVENT_STATUS.get(r["event_code"], "未知")
-        conn.execute("UPDATE waybills SET status_proj=? WHERE id=?", (proj, r["waybill_id"]))
-        conn.execute(
-            "INSERT INTO status_proofs(waybill_id, last_hop_id, mapped_code, proj_value, created_at) VALUES (?,?,?,?,datetime('now'))",
-            (r["waybill_id"], r["id"], r["event_code"], proj),
-        )
+    """与装载 / 合并共用同一投影口径，避免证明数字各算一套。"""
+    from app.services import projection as projection_svc
+
+    ids = [
+        r["id"] for r in conn.execute("SELECT id FROM waybills ORDER BY id").fetchall()
+    ]
+    for wid in ids:
+        projection_svc.recompute(conn, wid, write_proof=True)
 
 
 def map_status(event_code: str) -> str:

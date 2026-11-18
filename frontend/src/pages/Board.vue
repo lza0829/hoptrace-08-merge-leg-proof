@@ -35,6 +35,8 @@ watch(selected, (id) => {
 
 const hops = computed(() => detail.value?.hops || [])
 const proof = computed(() => detail.value?.proof)
+const merge = computed(() => detail.value?.merge)
+const mergedCount = computed(() => merge.value?.merged_count ?? 0)
 </script>
 
 <template>
@@ -69,9 +71,12 @@ const proof = computed(() => detail.value?.proof)
           <span>{{ selected }}</span>
         </div>
         <div class="v-axis" v-if="hops.length">
-          <div class="hop-node" v-for="h in hops" :key="h.id">
+          <div class="hop-node" :class="{ merged: h.merged }" v-for="h in hops" :key="h.id">
             <div class="ts">{{ h.event_ts }}</div>
-            <div class="code">{{ h.event_code }}</div>
+            <div class="code">
+              {{ h.event_code }}
+              <span v-if="h.merged" class="merged-tag">并入 · {{ h.source_member_id }}</span>
+            </div>
             <div class="loc">{{ h.location_code }} · {{ h.id }}</div>
           </div>
         </div>
@@ -93,6 +98,31 @@ const proof = computed(() => detail.value?.proof)
           <dt>写入</dt><dd>{{ proof.created_at }}</dd>
         </dl>
         <p v-else class="muted">暂无证明</p>
+
+        <h2>合并关系</h2>
+        <template v-if="merge">
+          <dl class="kv" v-if="merge.role === 'master'">
+            <dt>角色</dt><dd>主单</dd>
+            <dt>批次</dt><dd>{{ merge.batch_id || '—' }}</dd>
+            <dt>并入点</dt><dd>{{ mergedCount }}</dd>
+            <dt>成员段</dt><dd>{{ merge.members?.length || 0 }}</dd>
+          </dl>
+          <dl class="kv" v-else>
+            <dt>角色</dt><dd>成员段</dd>
+            <dt>并入到</dt><dd>{{ merge.merged_into }}</dd>
+            <dt>并入点</dt><dd>{{ merge.merged_count }}</dd>
+            <dt>批次</dt><dd>{{ merge.batch_id || '—' }}</dd>
+          </dl>
+          <ul class="member-list" v-if="merge.role === 'master' && merge.members?.length">
+            <li v-for="m in merge.members" :key="m.id">
+              {{ m.id }} · {{ m.merged_count }} 点
+            </li>
+          </ul>
+          <router-link v-if="merge.batch_id" class="proof-link" :to="{ path: '/merge' }">
+            查看合并证明 →
+          </router-link>
+        </template>
+        <p v-else class="muted">无合并记录</p>
       </aside>
 
       <footer class="pane dot-rail">

@@ -20,4 +20,13 @@ export const api = {
   ingest: () => req('/api/ingest/run', { method: 'POST' }),
   proofs: (waybillId) =>
     req(waybillId ? `/api/status-proofs?waybill_id=${encodeURIComponent(waybillId)}` : '/api/status-proofs'),
+  mergeRun: (masterId, memberIds) =>
+    req('/api/merge/run', {
+      method: 'POST',
+      body: JSON.stringify({ master_id: masterId, member_ids: memberIds }),
+    }),
+  mergeFixture: (mode) =>
+    req(`/api/merge/fixture?mode=${encodeURIComponent(mode)}`, { method: 'POST' }),
+  mergeBatches: () => req('/api/merge/batches'),
+  mergeBatch: (batchId) => req(`/api/merge/batches/${encodeURIComponent(batchId)}`),
 }
